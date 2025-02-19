@@ -11,12 +11,12 @@ import json
 
 
 # Load environment variables
-load_dotenv()
-
+load_dotenv(override=True)
+print(os.getenv('OPENAI_API_KEY'))
 # Load OpenAI API key
 config_list = [
     {
-        'model': os.getenv("MONGO_URI"),
+        'model': os.getenv("MODEL"),
         'api_key': os.getenv("OPENAI_API_KEY")
     }
 ]
@@ -55,8 +55,8 @@ def generate_interview_questions(job_description, resume_text):
 
     # Define the prompt for generating questions
     prompt = f"""
-    You are an AI interviewer. Your task is to generate a set of behavioral, case-based, problem-solving, and multiple-choice questions to assess a candidate's fit for a job based on the job description and their resume.
-
+    You are an AI interviewer. Your task is to generate a set of behavioral, case-based, problem-solving, and multiple-choice questions in Mongolian language to assess a candidate's fit for a job based on the job description and their resume.
+    
     Job Description:
     {job_description}
 
@@ -75,10 +75,10 @@ def generate_interview_questions(job_description, resume_text):
     # Initiate the conversation
     user_proxy.initiate_chat(assistant, message=prompt)
 
-    print("LASTMSG: ", assistant.last_message())
-
     # Retrieve the generated questions
     questions = assistant.last_message()["content"]
+    if "TERMINATE" in questions:
+        questions = questions.rstrip().rstrip("TERMINATE")
     questions = questions.lstrip("```json\n").rstrip("\n```")
     questions_dict = json.loads(questions)
     return questions_dict  # Split into individual questions
@@ -105,10 +105,10 @@ def needs_follow_up(question, response):
     prompt = f"""
     You are an AI interviewer. Your task is to determine if a follow-up question is needed based on the candidate's response.
 
-    Question: {question}
-    Response: {response}
+    Question in Mongolian language: {question}
+    Response in Mongolian language: {response}
 
-    Decide if a follow-up question is needed. If yes, provide the follow-up question. If no, simply say "No follow-up needed."
+    Decide if a follow-up question is needed. If yes, provide the follow-up question in Mongolian language. If no, simply say "No follow-up needed."
     """
 
     # Initiate the conversation
@@ -139,6 +139,7 @@ def score_responses(questions, responses, job_description):
     # Define the prompt for scoring
     prompt = f"""
     You are an AI evaluator. Your task is to score the candidate's response to an interview question on a scale of 1-10 based on relevance, depth, and alignment with the job description and then make a final decision on whether to hire the candidate based on their interview scores.
+    You must respond in Mongolian language.
 
     Job Description:
     {job_description}
@@ -287,7 +288,7 @@ def main():
         if st.session_state.current_question_type < len(question_types):
             if not st.session_state.in_follow_up:
                 current_question = st.session_state.questions[question_types[st.session_state.current_question_type]][st.session_state.current_question_index]
-                st.subheader(f"Question {st.session_state.current_question_index + 1}:")
+                st.subheader(f"{question_types[st.session_state.current_question_type]} question {st.session_state.current_question_index + 1}:")
                 if st.session_state.current_question_type == 3:
                     st.write(current_question['question'])
                 else:
