@@ -12,7 +12,6 @@ import json
 import requests
 from bson import ObjectId
 import re
-from threading import Thread
 
 # Load environment variables
 load_dotenv(override=True)
@@ -42,18 +41,6 @@ def extract_text_from_pdf(file):
     return text
 
 
-eval_loop = asyncio.new_event_loop()
-
-
-def set_eval_loop(loop):
-    asyncio.set_event_loop(loop)
-    loop.run_forever()
-
-
-eval_thread = Thread(target=set_eval_loop, args=(eval_loop,))
-eval_thread.start()
-
-
 # Function to analyze job description and resume to determine question types and counts
 def analyze_job_and_resume(job_description, resume_text):
     assistant = AssistantAgent(
@@ -72,7 +59,8 @@ def analyze_job_and_resume(job_description, resume_text):
 
     prompt = f"""
     Analyze the following job description and resume to determine the most relevant types of interview questions and the appropriate number of questions for each type.
-    Assume it is a 30 minute interview.
+    Assume it is a 20 minute interview.
+    It is not necessary to have all types of questions.
 
     Job Description:
     {job_description}
@@ -121,8 +109,9 @@ def generate_interview_questions(job_description, resume_text, question_counts):
     prompt = f"""
     You are an AI interviewer. Your task is to generate a set of behavioral, case-based, problem-solving, and multiple-choice questions in Mongolian language to assess a candidate's fit for a job based on the job description and their resume.
     You should primarily focus on what the candidate stated in their resume to generate responsibility oriented questions.
-    Total time to complete all the questions should be under 30 minutes.
-    Include a rough estimate of the time needed to answer each question in minutes.    
+    Total time to complete all the questions should be under 20 minutes.
+    Include a rough estimate of the time needed to answer each question in minutes. 
+    For tech related jobs, try to come up with coding related questions involving code snippets and completion and specific frameworks or technology mentioned in the resume.   
     
     Job Description:
     {job_description}
@@ -130,7 +119,7 @@ def generate_interview_questions(job_description, resume_text, question_counts):
     Resume:
     {resume_text}
 
-    Generate:
+    You can choose to generate from the following types of questions:
     - {question_counts['behavioral']} behavioral questions
     - {question_counts['case-based']} case-based questions
     - {question_counts['problem-solving']} problem-solving tasks (to be completed with plain text)
@@ -141,7 +130,7 @@ def generate_interview_questions(job_description, resume_text, question_counts):
         "behavioral": [{{"question": <the question text>, "time": <estimated completion time in integer minutes>}}],
         "case-based": [{{"question": <the question text>, "time": <estimated completion time in integer minutes>}}],
         "problem-solving": [{{"question": <the question text>, "time": <estimated completion time in integer minutes>}}],
-        "multiple-choice": [{{"question": <the question text>, "options": [<options>] "time": <estimated completion time in integer minutes>}}],
+        "multiple-choice": [{{"question": <the question text>, "options": [<options>], "correct": <correct answer>, "time": <estimated completion time in integer minutes>}}],
     }}
     """
 
@@ -206,7 +195,7 @@ def needs_follow_up(question, response):
     return json.loads(follow_up)
 
 
-async def evaluate_response(question, job_description):
+def evaluate_response(question, job_description):
     # Create an AutoGen assistant agent
     assistant = AssistantAgent(
         name="scoring_agent",
@@ -223,7 +212,7 @@ async def evaluate_response(question, job_description):
         code_execution_config=False
     )
 
-    if question['follow_up']:
+    if 'follow_up' in question:
         follow_up_prompt = f"""Question: {question['question']}
             Response: {question['response']}
             Follow-up question: {question['follow_up']}
@@ -280,7 +269,7 @@ async def print_timer(job_description, timer, s):
                 current_question["follow_up_response"] = "Цагтаа багтаж хариулт өгж чадсангүй."
             else:
                 current_question["response"] = "Цагтаа багтаж хариулт өгж чадсангүй."
-            asyncio.run_coroutine_threadsafe(evaluate_response(current_question, job_description), eval_loop)
+            evaluate_response(current_question, job_description)
             st.session_state.current_question_index += 1
             if st.session_state.current_question_index >= len(
                     st.session_state.questions[question_types[st.session_state.current_question_type]]):
@@ -394,8 +383,7 @@ def main():
 
         if st.session_state.stage == "main":
             # Evaluate responses after all questions are answered
-            if st.session_state.current_question_type >= len(question_types):
-                eval_loop.close()
+            if st.session_state.current_question_type >= len(st.session_state.questions):
                 st.subheader("Амжилттай асуулдуутад хариулж дууслаа.")
                 st.write(
                     "Ярилцлагын үйл явц танд хэр санагдсан бэ? Ямар нэгэн сайжруулах зүйл байвал хуваалцана уу. Таны санал бидэнд ирээдүйд ярилцлагын туршлагыг улам сайжруулахад маш чухал байх болно. Баярлалаа! 😊")
@@ -423,7 +411,7 @@ def main():
                     st.rerun()
 
             # Display current question or follow-up
-            if st.session_state.current_question_type < len(question_types):
+            if st.session_state.current_question_type < len(question_types) and question_types[st.session_state.current_question_type] in st.session_state.questions:
                 timer = st.empty()
                 if not st.session_state.in_follow_up:
                     current_question = st.session_state.questions[question_types[st.session_state.current_question_type]][
@@ -471,8 +459,7 @@ def main():
                                 current_question["follow_up_response"] = response
                             else:
                                 current_question["response"] = response
-                            asyncio.run_coroutine_threadsafe(evaluate_response(current_question, job_description),
-                                                             eval_loop)
+                            evaluate_response(current_question, job_description)
                             # eval_loop.call_soon_threadsafe(asyncio.async, evaluate_response(current_question, job_description))
                             st.session_state.current_question_index += 1
                             st.session_state.in_follow_up = False
@@ -485,6 +472,9 @@ def main():
                         st.session_state.start_time = time.time()
                         st.rerun()
                 asyncio.run(print_timer(job_description, timer, 60 * current_question['time']))
+            elif st.session_state.current_question_type < len(question_types):
+                st.session_state.current_question_type += 1
+                st.rerun()
 
 
 if __name__ == "__main__":
