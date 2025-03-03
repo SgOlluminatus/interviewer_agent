@@ -10,6 +10,7 @@ import os
 from bson import ObjectId
 import requests
 from io import BytesIO
+import time
 
 import logfire
 from pydantic import BaseModel, Field
@@ -80,7 +81,7 @@ interviewer_agent = Agent(
         "Do not ask behavioral questions, only ask job specific questions. "
         "Use the evaluate_response tool to evaluate my answer when you receive my input. "
         "If there is an error, point it out. "
-        "Finish the interview when you already asked 10 questions or you think it has been 10 minutes. "
+        "Finish the interview when you already asked 6 questions or you think it has been 10 minutes. "
         "Use the evaluate_interview tool to perform a summative evaluation of the whole interview at the end. "
         "Use save_results tool to save the list of questions, answers and evaluations after finishing."
     ),
@@ -136,6 +137,7 @@ async def generate_question(ctx: RunContext[InterviewDetails]) -> InterviewQuest
         "Please generate a question",
         deps=ctx.deps
     )
+    st.session_state.current_question_time = r.data.time
     return r.data
 
 @interviewer_agent.tool
@@ -199,6 +201,25 @@ async def save_results(ctx: RunContext[InterviewDetails], summary: str) -> str:
 async def get_interview_detail(ctx: RunContext[InterviewDetails]) -> str:
     return f"Interview details: {ctx.deps.model_dump()}"
 
+async def print_timer(job_description, timer, s):
+    while True:
+        # Timer
+        time_remaining = s - (time.time() - st.session_state.start_time)
+        if time_remaining > 0:
+            timer.markdown(f"Үлдсэн хугацаа: {int(time_remaining // 60)}:{int(time_remaining % 60):02d}")
+            await asyncio.sleep(1)
+        else:
+            st.toast("Цаг дууслаа. Дараагийн асуулт руу шилжлээ.")
+            with st.spinner("Түр хүлээнэ үү"):
+                result = await interviewer_agent.run(
+                    user_prompt="Time's up, moving on to the next question.",
+                    deps=st.session_state.interview_details,
+                    message_history=st.session_state.history
+                )
+                st.session_state.history = result.all_messages()
+                st.session_state.display_msg = result.data
+                st.session_state.start_time = time.time()
+                st.rerun()
 
 async def main():
     st.title("AI Interview Agent")
@@ -257,31 +278,39 @@ async def main():
             st.session_state.display_msg = ""
         if "responses" not in st.session_state:
             st.session_state.responses = []
+        if "start_time" not in st.session_state:
+            st.session_state.start_time = time.time()
+        if "current_question_time" not in st.session_state:
+            st.session_state.current_question_time = 1
 
         if len(st.session_state.history) == 0:
-            result = await interviewer_agent.run(
-                user_prompt="Hello, Let's start the interview.",
-                deps=st.session_state.interview_details
-            )
-            st.session_state.history = result.all_messages()
-            st.session_state.display_msg = result.data
+            with st.spinner("Түр хүлээнэ үү"):
+                result = await interviewer_agent.run(
+                    user_prompt="Hello, Let's start the interview.",
+                    deps=st.session_state.interview_details
+                )
+                st.session_state.history = result.all_messages()
+                st.session_state.display_msg = result.data
             if st.button("Start"):
                 st.rerun()
         else:
+            timer = st.empty()
             with st.chat_message("assistant"):
                 st.write(st.session_state.display_msg)
             answer = st.chat_input("Your answer:")
 
             if answer:
-                result = await interviewer_agent.run(
-                    user_prompt=answer,
-                    deps=st.session_state.interview_details,
-                    message_history=st.session_state.history
-                )
-                st.session_state.history = result.all_messages()
-                st.session_state.display_msg = result.data
-                st.rerun()
-
+                with st.spinner("Түр хүлээнэ үү"):
+                    result = await interviewer_agent.run(
+                        user_prompt=answer,
+                        deps=st.session_state.interview_details,
+                        message_history=st.session_state.history
+                    )
+                    st.session_state.history = result.all_messages()
+                    st.session_state.display_msg = result.data
+                    st.session_state.start_time = time.time()
+                    st.rerun()
+            asyncio.run(print_timer(job_description, timer, 60 * st.session_state.current_question_time))
 
 if __name__ == "__main__":
     asyncio.run(main())
