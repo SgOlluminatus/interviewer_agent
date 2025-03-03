@@ -63,7 +63,7 @@ class InterviewResponse(BaseModel):
     question: str
     answer: str
     evaluation: str
-    score: int
+    score: int = Field(description="The score (1-100) of the response.")
 
 interviewer_agent = Agent(
     model=model,
