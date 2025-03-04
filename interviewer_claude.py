@@ -1,47 +1,65 @@
 import asyncio
+from PyPDF2 import PdfReader
+import streamlit as st
+from typing import List, Optional, Union, Literal
+import nest_asyncio
+from dotenv import load_dotenv
+from pymongo import MongoClient
+from pymongo.server_api import ServerApi
 import os
-import time
+from bson import ObjectId
+import requests
 from io import BytesIO
-from typing import Dict, List, Optional
+import time
 
 import logfire
-import nest_asyncio
-import requests
-import streamlit as st
-from bson import ObjectId
-from dotenv import load_dotenv
 from pydantic import BaseModel, Field
-from pydantic_ai import Agent, RunContext
 from pydantic_ai.models.openai import OpenAIModel
-from PyPDF2 import PdfReader
-from pymongo import MongoClient
-from pymongo.errors import ConnectionFailure, OperationFailure
-from pymongo.server_api import ServerApi
+from pydantic_ai import Agent, RunContext
 
-# Apply nest_asyncio to allow nested event loops
 nest_asyncio.apply()
 
 # Load environment variables
 load_dotenv(override=True)
 
-# Initialize OpenAI model and logging
-model = OpenAIModel(os.getenv("MODEL", "gpt-4"), api_key=os.getenv("OPENAI_API_KEY"))
+model = OpenAIModel(os.getenv("MODEL"), api_key=os.getenv("OPENAI_API_KEY"))
 logfire.configure(send_to_logfire='if-token-present')
 
-# Application constants
-INTERVIEW_LENGTH_MINUTES = 10
-DEFAULT_QUESTION_TIME_MINUTES = 2
-MAX_QUESTIONS = 6
-DB_NAME = "interview_db"
+# MongoDB setup
+mongo_uri = os.getenv("MONGO_URI")
+client = MongoClient(mongo_uri, server_api=ServerApi('1'))
+db = client["interview_db"]
+collection = db["candidate_interviews"]
+candidates = db["candidates"]
+job_descriptions = db["job_desc"]
 
 
-# --- Data Models ---
+class InterviewQuestionType(BaseModel):
+    """Type of interview question format"""
+    type: Literal["short_text", "multiple_choice", "yes_no"] = Field(
+        description="The type of question format"
+    )
+
 
 class InterviewQuestion(BaseModel):
     """Details of an interview question to ask a candidate."""
-    question: str
-    time: int = Field(description="The time required to answer the question in minutes")
-    options: Optional[List[str]] = Field(default=None, description="Answer options for a multiple choice question")
+    question: str = Field(description="The specific question to ask the candidate")
+    question_type: InterviewQuestionType = Field(description="The format of the question")
+    time: int = Field(description="The time allowed to answer the question in minutes (1-5)")
+    options: Optional[List[str]] = Field(
+        None, 
+        description="Answer options for a multiple choice question, required only for multiple_choice type questions"
+    )
+    skill_assessed: str = Field(description="The specific job skill or requirement being assessed by this question")
+    difficulty: Literal["basic", "intermediate", "advanced"] = Field(description="The difficulty level of the question")
+
+
+class InterviewCriteria(BaseModel):
+    """Evaluation criteria for the interview."""
+    technical_skills: List[str] = Field(description="List of technical skills to evaluate from the job description")
+    soft_skills: List[str] = Field(description="List of soft skills to evaluate from the job description")
+    experience_requirements: List[str] = Field(description="Key experience requirements from the job description")
+    scoring_matrix: str = Field(description="Detailed scoring matrix for evaluating answers")
 
 
 class InterviewDetails(BaseModel):
@@ -51,589 +69,478 @@ class InterviewDetails(BaseModel):
 
 
 class InterviewResponse(BaseModel):
-    """Evaluation of a candidate's response to a question."""
+    """Evaluation of a candidate's answer."""
     question: str
     answer: str
     evaluation: str
-    score: int = Field(description="The score (1-100) of the response.")
+    technical_score: int = Field(description="The technical skill score (1-100)")
+    relevance_score: int = Field(description="How relevant the answer was to the question (1-100)")
+    completeness_score: int = Field(description="How complete the answer was (1-100)")
+    overall_score: int = Field(description="The overall score (1-100) of the response")
+    skill_feedback: str = Field(description="Specific feedback on the skill being assessed")
 
 
-# --- Database Connection ---
-
-class Database:
-    """Database connection and operations manager."""
-    
-    def __init__(self):
-        """Initialize database connection."""
-        self.client = None
-        self.db = None
-        self.connect()
-        
-    def connect(self):
-        """Establish connection to MongoDB."""
-        try:
-            mongo_uri = os.getenv("MONGO_URI")
-            if not mongo_uri:
-                st.error("MongoDB URI not found in environment variables.")
-                return
-                
-            self.client = MongoClient(mongo_uri, server_api=ServerApi('1'))
-            # Ping the server to confirm connection
-            self.client.admin.command('ping')
-            self.db = self.client[DB_NAME]
-            st.session_state.db_connected = True
-        except ConnectionFailure:
-            st.error("Failed to connect to MongoDB. Please check your connection and try again.")
-            st.session_state.db_connected = False
-        except Exception as e:
-            st.error(f"Database error: {str(e)}")
-            st.session_state.db_connected = False
-    
-    def save_interview(self, interview_data: Dict) -> Optional[str]:
-        """Save interview data to the database.
-        
-        Args:
-            interview_data: Dictionary containing interview details and results
-            
-        Returns:
-            String ID of the saved document or None if operation failed
-        """
-        if not self.db:
-            st.warning("Database connection not available")
-            return None
-            
-        try:
-            result = self.db["candidate_interviews"].insert_one(interview_data)
-            return str(result.inserted_id)
-        except OperationFailure as e:
-            st.error(f"Failed to save interview: {str(e)}")
-            return None
-    
-    def get_candidate(self, candidate_id: str) -> Optional[Dict]:
-        """Retrieve candidate information by ID.
-        
-        Args:
-            candidate_id: String ID of the candidate
-            
-        Returns:
-            Dictionary with candidate data or None if not found
-        """
-        if not self.db:
-            return None
-            
-        try:
-            return self.db["candidates"].find_one({"_id": ObjectId(candidate_id)})
-        except Exception as e:
-            st.error(f"Failed to retrieve candidate: {str(e)}")
-            return None
-    
-    def get_job_description(self, job_id: str) -> Optional[Dict]:
-        """Retrieve job description by ID.
-        
-        Args:
-            job_id: String ID of the job description
-            
-        Returns:
-            Dictionary with job description or None if not found
-        """
-        if not self.db:
-            return None
-            
-        try:
-            return self.db["job_desc"].find_one({"_id": ObjectId(job_id)})
-        except Exception as e:
-            st.error(f"Failed to retrieve job description: {str(e)}")
-            return None
+class InterviewSummary(BaseModel):
+    """Summary evaluation of the entire interview."""
+    technical_strengths: List[str] = Field(description="Technical strengths demonstrated by the candidate")
+    technical_weaknesses: List[str] = Field(description="Technical areas for improvement")
+    overall_fit_score: int = Field(description="Overall job fit score (1-100)")
+    recommendation: str = Field(description="Hiring recommendation and justification")
+    key_observations: List[str] = Field(description="Key observations from the interview")
 
 
-# --- File Handling ---
-
-def extract_text_from_pdf(file) -> str:
-    """Extract all text from a PDF file.
-    
-    Args:
-        file: A file-like object containing PDF data
-        
-    Returns:
-        String containing all extracted text
-    """
-    try:
-        reader = PdfReader(file)
-        text = ""
-        for page in reader.pages:
-            text += page.extract_text()
-        return text
-    except Exception as e:
-        st.error(f"Error extracting text from PDF: {str(e)}")
-        return "Failed to extract text from resume."
+# Function to extract text from a PDF (for the resume)
+def extract_text_from_pdf(file):
+    reader = PdfReader(file)
+    text = ""
+    for page in reader.pages:
+        text += page.extract_text()
+    return text
 
 
-def download_file(url: str) -> Optional[BytesIO]:
-    """Download a file from a URL and return it as BytesIO.
-    
-    Args:
-        url: The URL of the file to download
-        
-    Returns:
-        BytesIO object containing the file or None if download failed
-    """
-    try:
-        response = requests.get(url, timeout=10)
-        response.raise_for_status()
-        return BytesIO(response.content)
-    except requests.exceptions.RequestException as e:
-        st.error(f"Failed to download file: {str(e)}")
-        return None
-
-
-# --- Agent Definitions ---
-
-# Define the interviewer agent with improved prompts
+# Main interviewer agent with improved system prompt
 interviewer_agent = Agent(
     model=model,
     deps_type=InterviewDetails,
-    retries=3,
+    retries=5,
     system_prompt=(
-        "You are a professional technical interviewer who specializes in assessing candidates "
-        "for software development roles. Follow these guidelines strictly:\n\n"
-        "1. Begin by generating evaluation criteria using the generate_evaluation_criteria tool\n"
-        "2. Ask focused, technical questions about the candidate's skills relevant to the job description\n"
-        "3. Do not repeat questions or ask generic behavioral questions\n"
-        "4. Evaluate each response thoroughly using the evaluate_response tool\n"
-        "5. Focus on depth of technical knowledge, problem-solving approach, and critical thinking\n"
-        "6. Maintain a professional but conversational tone\n"
-        "7. End the interview after asking 6 questions or when you reach the 10-minute mark\n"
-        "8. Provide a comprehensive final evaluation using the evaluate_interview tool\n"
-        "9. Save all results using the save_results tool\n\n"
-        "Remember to be fair and objective in your assessment."
+        "You are a professional technical interviewer conducting a job-specific interview. "
+        "Your task is to assess the candidate's qualifications for the specific role described in the job description. "
+        "Begin by using the generate_evaluation_criteria tool to create a detailed evaluation framework based on the job requirements. "
+        "This framework will guide your questioning and assessment throughout the interview. "
+        "Ask questions that directly assess the required skills, knowledge, and experience from the job description. "
+        "Use the candidate's resume information to tailor questions to their background and identify potential gaps. "
+        "For each question: "
+        "1. Use generate_question to create a role-specific question "
+        "2. Wait for the candidate's response "
+        "3. Use evaluate_response to assess their answer against the job requirements "
+        "Ask 5-6 questions in total, mixing technical skills assessment with job-specific scenarios. "
+        "Vary question formats (multiple choice, short text, yes/no) as appropriate for the skill being assessed. "
+        "Complete the interview by using evaluate_interview to provide a comprehensive assessment of the candidate's fit for the role. "
+        "Finally, use save_results to store the interview data and evaluation."
     ),
 )
 
-# Define the question generator agent with improved prompts
+
+# Question generator with enhanced job specificity
 question_generator = Agent(
     model=model,
     deps_type=InterviewDetails,
     result_type=InterviewQuestion,
     system_prompt=(
-        "You are an expert at creating technical interview questions. Your task is to generate "
-        "challenging but fair questions based on the job description and candidate's resume.\n\n"
-        "Guidelines for creating questions:\n"
-        "1. Focus on technical skills directly relevant to the job description\n"
-        "2. Vary question types (coding problems, system design, debugging scenarios, etc.)\n"
-        "3. Adjust difficulty based on the candidate's experience level\n"
-        "4. Make questions specific and actionable\n"
-        "5. Avoid generic or overly theoretical questions\n"
-        "6. For multiple choice questions, include 3-4 plausible options\n"
-        "7. Assign an appropriate time limit between 1-3 minutes\n\n"
-        "Each question should reveal the depth of the candidate's knowledge in a specific area."
+        "You are an expert technical interviewer who creates highly targeted questions to assess job candidates. "
+        "Your task is to generate a specific job-relevant question based on the provided job description and candidate resume. "
+        
+        "First, analyze the job description to identify: "
+        "1. Key technical skills required (programming languages, tools, frameworks, methodologies) "
+        "2. Experience requirements (years, domains, project types) "
+        "3. Core responsibilities of the position "
+        "4. Problem-solving abilities needed "
+        
+        "Then, review the candidate's resume to understand: "
+        "1. Their current technical skill set "
+        "2. Experience level and background "
+        "3. Potential knowledge gaps related to the job requirements "
+        "4. Areas where deeper assessment is needed "
+        
+        "Create a question that directly tests a specific job requirement, choosing a format appropriate for the skill being tested: "
+        "- Use multiple_choice for knowledge verification questions "
+        "- Use short_text for conceptual understanding or problem-solving questions "
+        "- Use yes_no for experience verification "
+        
+        "Make technical questions precise and focused on a single concept or skill. "
+        "For multiple choice questions, provide 3-5 options with one clear correct answer. "
+        "Ensure the question has an appropriate difficulty level and can be reasonably answered in the allocated time. "
+        "Specify exactly which job skill or requirement is being assessed by this question. "
+        "Vary the difficulty level across different questions to comprehensively assess the candidate."
     )
 )
 
-# Define the evaluation criteria generator
-critic_generator = Agent(
+
+# Evaluation criteria generator with job-specific focus
+criteria_generator = Agent(
     model=model,
     deps_type=InterviewDetails,
+    result_type=InterviewCriteria,
     system_prompt=(
-        "You are an expert in technical interview evaluation methodologies. Create a detailed "
-        "evaluation matrix specific to the job description and the candidate's resume.\n\n"
-        "Your evaluation matrix should:\n"
-        "1. Include 4-6 key dimensions relevant to the role (e.g., technical knowledge, problem-solving, code quality)\n"
-        "2. Define clear scoring criteria for each dimension (1-100 scale)\n"
-        "3. Specify what constitutes excellent, good, satisfactory, and poor performance\n"
-        "4. Weight dimensions according to their importance for the specific role\n"
-        "5. Include both technical skills and soft skills relevant to the position\n\n"
-        "The matrix should be concise but comprehensive enough to provide fair and consistent evaluation."
+        "You are an expert in creating job-specific evaluation frameworks for technical interviews. "
+        "Your task is to analyze the provided job description and candidate resume to create a detailed evaluation criteria matrix. "
+        
+        "First, thoroughly analyze the job description to extract: "
+        "1. All required technical skills (languages, frameworks, tools, methodologies) "
+        "2. Necessary soft skills (communication, teamwork, problem-solving) "
+        "3. Experience requirements (years, industry knowledge, specific domains) "
+        "4. Key responsibilities of the role "
+        
+        "Then create a comprehensive evaluation framework that includes: "
+        "1. A detailed list of technical skills to be assessed, directly derived from the job requirements "
+        "2. Soft skills relevant to the specific role "
+        "3. Experience requirements that should be verified "
+        "4. A detailed scoring matrix that defines what constitutes excellent, good, average, and poor responses "
+        "   for this specific role "
+        
+        "The scoring matrix should be explicit about what demonstrates mastery in each required area. "
+        "Focus on creating criteria that will objectively measure the candidate's fit for THIS SPECIFIC ROLE, "
+        "not generic interview criteria. "
+        "The criteria must be directly traceable to specific requirements in the job description."
     )
 )
 
-# Define the response evaluator
+
+# Response evaluator with job-specific assessment
 response_evaluator = Agent(
     model=model,
     deps_type=InterviewDetails,
     result_type=InterviewResponse,
     system_prompt=(
-        "You are an expert technical evaluator assessing interview responses. Your evaluation should be:\n\n"
-        "1. Objective and based on the pre-established criteria\n"
-        "2. Specific in identifying strengths and weaknesses\n"
-        "3. Balanced in considering both technical accuracy and communication quality\n"
-        "4. Numerical (assign a score from 1-100) with clear justification\n"
-        "5. Focused on evidence from the response rather than assumptions\n\n"
-        "Provide detailed, actionable feedback that explains the score and highlights key observations."
+        "You are an expert technical evaluator assessing candidate responses against specific job requirements. "
+        "Your task is to provide an objective, detailed evaluation of a candidate's answer based on: "
+        "1. The job's specific technical requirements "
+        "2. The skill being assessed by the question "
+        "3. The evaluation criteria established for this role "
+        
+        "For each response, analyze: "
+        "1. Technical accuracy: Is the answer technically correct based on industry standards? "
+        "2. Relevance: Does the answer address the specific skill being assessed? "
+        "3. Depth: Does the candidate demonstrate appropriate depth of knowledge for the role level? "
+        "4. Practical application: Does the candidate show how they've applied this knowledge? "
+        
+        "Provide scores on a scale of 1-100 for technical skill, relevance, completeness, and overall quality. "
+        "Give specific feedback on the skill being assessed, highlighting strengths and areas for improvement. "
+        "Ground your evaluation in the specific job requirements, not general interview standards. "
+        "Be fair but thorough in identifying gaps between the candidate's demonstrated knowledge and the job requirements."
     )
 )
 
-# Define the summative evaluator
+
+# Summative evaluator for overall assessment
 summative_evaluator = Agent(
     model=model,
     deps_type=InterviewDetails,
+    result_type=InterviewSummary,
     system_prompt=(
-        "You are conducting a holistic evaluation of an entire technical interview. Your summative assessment should:\n\n"
-        "1. Synthesize patterns across all responses\n"
-        "2. Identify the candidate's key strengths and improvement areas\n"
-        "3. Evaluate alignment with the specific job requirements\n"
-        "4. Consider technical skills, problem-solving approach, and communication ability\n"
-        "5. Provide a hiring recommendation with clear justification\n"
-        "6. Suggest potential role fits if the candidate is strong but not ideal for the original position\n\n"
-        "Be balanced, fair, and focus on evidence from the interview responses."
+        "You are a senior technical hiring manager making a final assessment of a candidate's fit for a specific role. "
+        "Review all the questions, answers, and individual evaluations from the interview to create a comprehensive assessment. "
+        
+        "Your evaluation should: "
+        "1. Identify clear technical strengths where the candidate meets or exceeds job requirements "
+        "2. Highlight technical areas where the candidate may need development relative to job requirements "
+        "3. Assess overall fit for the specific role based on the job description requirements "
+        "4. Provide a clear hiring recommendation with justification "
+        "5. Note key observations about the candidate's technical abilities and potential "
+        
+        "Focus on how well the candidate's demonstrated skills and knowledge align with the SPECIFIC job requirements. "
+        "Consider both the technical skills and the level of expertise required. "
+        "Be objective and evidence-based, citing specific answers that support your assessment. "
+        "The overall fit score should reflect how closely the candidate's demonstrated abilities match the key requirements. "
+        "Provide actionable insights that would help the hiring team make an informed decision."
     )
 )
 
 
-# --- Agent Tools ---
-
 @interviewer_agent.tool
 async def generate_question(ctx: RunContext[InterviewDetails]) -> InterviewQuestion:
-    """Generate a new interview question based on job requirements and candidate profile."""
-    try:
-        r = await question_generator.run(
-            "Generate a technical interview question appropriate for this candidate and job role",
-            deps=ctx.deps
-        )
-        # Set a reasonable default if no time is specified
-        question_time = r.data.time if r.data.time > 0 else DEFAULT_QUESTION_TIME_MINUTES
-        st.session_state.current_question_time = question_time
-        return r.data
-    except Exception as e:
-        st.error(f"Error generating question: {str(e)}")
-        # Return a default question as fallback
-        return InterviewQuestion(
-            question="Could you describe your most recent technical project and the challenges you faced?",
-            time=DEFAULT_QUESTION_TIME_MINUTES
-        )
+    """Generate a job-specific interview question based on the job description and resume."""
+    r = await question_generator.run(
+        "Generate a job-specific question that directly tests a requirement from the job description. "
+        "Consider what has already been asked and test a different skill or requirement.",
+        deps=ctx.deps
+    )
+    st.session_state.current_question_time = r.data.time
+    st.session_state.current_question_type = r.data.question_type.type
+    return r.data
 
 
 @interviewer_agent.tool
-async def generate_evaluation_criteria(ctx: RunContext[InterviewDetails]) -> str:
-    """Create a comprehensive evaluation framework for this specific interview."""
-    try:
-        r = await critic_generator.run(
-            "Generate an evaluation criteria matrix for this technical role",
-            deps=ctx.deps
-        )
-        return r.data
-    except Exception as e:
-        st.error(f"Error generating evaluation criteria: {str(e)}")
-        return "Technical knowledge (1-100), Problem-solving (1-100), Communication (1-100), Experience relevance (1-100)"
+async def generate_evaluation_criteria(ctx: RunContext[InterviewDetails]) -> InterviewCriteria:
+    """Create a detailed evaluation framework based on the specific job requirements."""
+    r = await criteria_generator.run(
+        "Create a comprehensive evaluation criteria matrix specifically tailored to this job role. "
+        "Extract the key technical skills, experience requirements, and responsibilities from the job description.",
+        deps=ctx.deps
+    )
+    st.session_state.evaluation_criteria = r.data
+    return r.data
 
 
 @interviewer_agent.tool(docstring_format='google')
-async def evaluate_response(ctx: RunContext[InterviewDetails], criteria: str, question: str, answer: str) -> str:
-    """Evaluate the candidate's answer based on established criteria.
+async def evaluate_response(ctx: RunContext[InterviewDetails], criteria, question, answer, skill_assessed) -> InterviewResponse:
+    """Evaluate the candidate's answer against the job-specific criteria.
 
     Args:
-        criteria: The evaluation criteria to apply
-        question: The question that was asked
-        answer: The candidate's response to evaluate
-
-    Returns:
-        A detailed evaluation of the response
+        criteria: The evaluation criteria for this role
+        question: The specific question asked
+        answer: The candidate's response
+        skill_assessed: The job skill being assessed by this question
     """
-    try:
-        r = await response_evaluator.run(
-            f"""Evaluate the candidate's answer according to our criteria:
-            
-            Evaluation Criteria: {criteria}
-            Question: {question}
-            Candidate's Answer: {answer}
-            
-            Provide a detailed assessment focusing on technical accuracy, completeness, and relevance.
-            """,
-            deps=ctx.deps
-        )
-        # Store the response in session state for later saving
-        if "responses" in st.session_state:
-            st.session_state.responses.append(r.data.model_dump())
-        return r.data.evaluation
-    except Exception as e:
-        st.error(f"Error evaluating response: {str(e)}")
-        return "Unable to evaluate the response due to a technical issue."
+    r = await response_evaluator.run(
+        f"""Evaluate the candidate's answer based on the job requirements:
+        
+        Job Requirements: The relevant section from the job description that relates to this skill is:
+        {ctx.deps.job_description}
+        
+        Question: {question}
+        Skill Being Assessed: {skill_assessed}
+        Answer: {answer}
+        
+        Evaluation Criteria: {criteria}
+        
+        Provide a detailed, job-specific evaluation focusing on how well the answer demonstrates the required skill.""",
+        deps=ctx.deps
+    )
+    st.session_state.responses.append(r.data.model_dump())
+    return r.data
 
 
 @interviewer_agent.tool
-async def evaluate_interview(ctx: RunContext[InterviewDetails]) -> str:
-    """Perform a comprehensive evaluation of the entire interview."""
-    responses = st.session_state.responses if "responses" in st.session_state else []
-    
-    try:
-        formatted_responses = ""
-        for i, response in enumerate(responses):
-            formatted_responses += f"Question {i+1}: {response.get('question')}\n"
-            formatted_responses += f"Answer: {response.get('answer')}\n"
-            formatted_responses += f"Evaluation: {response.get('evaluation')}\n"
-            formatted_responses += f"Score: {response.get('score')}\n\n"
+async def evaluate_interview(ctx: RunContext[InterviewDetails]) -> InterviewSummary:
+    """Provide a comprehensive assessment of the candidate's fit for the specific role."""
+    r = await summative_evaluator.run(
+        f"""Create a comprehensive evaluation of the candidate's fit for this specific role based on:
         
-        r = await summative_evaluator.run(
-            f"""Provide a comprehensive evaluation of this interview:
-            
-            Job Description: {ctx.deps.job_description}
-            Candidate Resume: {ctx.deps.candidate_information}
-            
-            Interview Responses:
-            {formatted_responses}
-            
-            Consider technical skills, problem-solving abilities, and job fit.
-            """,
-            deps=ctx.deps
-        )
-        return r.data
-    except Exception as e:
-        st.error(f"Error in final evaluation: {str(e)}")
-        return "Unable to generate a final evaluation due to a technical issue."
+        Job Description: {ctx.deps.job_description}
+        
+        Candidate Resume: {ctx.deps.candidate_information}
+        
+        Interview Responses: {st.session_state.responses}
+        
+        Provide a detailed assessment focusing on the match between the candidate's demonstrated abilities and the specific job requirements.""",
+        deps=ctx.deps
+    )
+    return r.data
 
 
 @interviewer_agent.tool(docstring_format='google')
-async def save_results(ctx: RunContext[InterviewDetails], summary: str) -> str:
-    """Save the complete interview results to the database.
+async def save_results(ctx: RunContext[InterviewDetails], summary: InterviewSummary) -> str:
+    """Save the interview results and final evaluation.
 
     Args:
-        summary: The final summative evaluation of the candidate
-
-    Returns:
-        Confirmation message about saved data
+        summary: The comprehensive interview evaluation and hiring recommendation
     """
-    try:
-        # Initialize database connection if not already done
-        if "db" not in st.session_state:
-            st.session_state.db = Database()
-        
-        # Prepare interview data based on the source (URL params or direct input)
-        if st.query_params and "candidate_id" in st.query_params and "job_desc_id" in st.query_params:
-            interview_data = {
-                "candidate_id": st.query_params['candidate_id'],
-                "job_desc_id": st.query_params['job_desc_id'],
-                "responses": st.session_state.responses,
-                "summary": summary,
-                "timestamp": time.time()
-            }
-        else:
-            interview_data = {
-                "resume": ctx.deps.candidate_information,
-                "job_description": ctx.deps.job_description,
-                "responses": st.session_state.responses,
-                "summary": summary,
-                "timestamp": time.time()
-            }
-        
-        # Save to database
-        result_id = st.session_state.db.save_interview(interview_data)
-        if result_id:
-            return f"Interview results saved successfully with ID: {result_id}"
-        else:
-            return "Failed to save interview results to the database."
-    except Exception as e:
-        st.error(f"Error saving results: {str(e)}")
-        return "Failed to save interview results due to a technical error."
+    if st.query_params:
+        interview_data = {
+            "candidate_id": st.query_params['candidate_id'],
+            "job_desc_id": st.query_params['job_desc_id'],
+            "responses": st.session_state.responses,
+            "summary": summary.model_dump()
+        }
+    else:
+        interview_data = {
+            "resume": st.session_state.interview_details.candidate_information,
+            "job_description": st.session_state.interview_details.job_description,
+            "responses": st.session_state.responses,
+            "summary": summary.model_dump()
+        }
+    collection.insert_one(interview_data)
+    return "Interview results saved successfully"
 
 
 @interviewer_agent.system_prompt
 async def get_interview_detail(ctx: RunContext[InterviewDetails]) -> str:
-    """Provide context about the interview to the agent."""
     return f"""
-    Job Description: 
+    JOB DESCRIPTION:
     {ctx.deps.job_description}
     
-    Candidate Information:
+    CANDIDATE RESUME:
     {ctx.deps.candidate_information}
+    
+    Your task is to conduct a targeted technical interview for this specific role. Focus on assessing the candidate's qualifications against the job requirements.
     """
 
 
-# --- Timer Implementation ---
+async def display_timer(timer, seconds_remaining):
+    while True:
+        # Timer
+        time_remaining = seconds_remaining - (time.time() - st.session_state.start_time)
+        if time_remaining > 0:
+            timer.markdown(f"Time remaining: {int(time_remaining // 60)}:{int(time_remaining % 60):02d}")
+            await asyncio.sleep(1)
+        else:
+            st.toast("Time's up. Moving to the next question.")
+            with st.spinner("Processing your response..."):
+                result = await interviewer_agent.run(
+                    user_prompt="Time's up, please evaluate this answer and continue to the next question.",
+                    deps=st.session_state.interview_details,
+                    message_history=st.session_state.history
+                )
+                st.session_state.history = result.all_messages()
+                st.session_state.display_msg = result.data
+                st.session_state.start_time = time.time()
+                st.rerun()
 
-async def countdown_timer(seconds: int, timer_placeholder):
-    """Display a countdown timer in the Streamlit app.
-    
-    Args:
-        seconds: Total seconds for countdown
-        timer_placeholder: Streamlit element to display the timer
-    """
-    end_time = time.time() + seconds
-    
-    while time.time() < end_time:
-        remaining = end_time - time.time()
-        mins, secs = divmod(int(remaining), 60)
-        timer_placeholder.markdown(f"⏱️ Time remaining: **{mins}:{secs:02d}**")
-        await asyncio.sleep(0.5)
-    
-    # Time's up
-    timer_placeholder.markdown("⏰ **Time's up!**")
-    return True
-
-
-# --- Main Application Function ---
 
 async def main():
-    """Main application function that handles the Streamlit UI and flow."""
+    st.title("AI Technical Interview System")
     
-    # Set up page config
-    st.set_page_config(
-        page_title="AI Technical Interviewer",
-        page_icon="🤖",
-        layout="wide"
-    )
-    
-    # Initialize session state variables
-    if "interview_details" not in st.session_state:
-        st.session_state.interview_details = None
-    if "history" not in st.session_state:
-        st.session_state.history = []
-    if "display_msg" not in st.session_state:
-        st.session_state.display_msg = ""
-    if "responses" not in st.session_state:
-        st.session_state.responses = []
-    if "start_time" not in st.session_state:
-        st.session_state.start_time = time.time()
-    if "current_question_time" not in st.session_state:
-        st.session_state.current_question_time = DEFAULT_QUESTION_TIME_MINUTES
-    if "db" not in st.session_state:
-        st.session_state.db = Database()
-    if "interview_in_progress" not in st.session_state:
-        st.session_state.interview_in_progress = False
-    
-    # Page header
-    st.title("🤖 AI Technical Interviewer")
+    # UI improvements
     st.markdown("""
-    This system conducts a technical interview based on your resume and the job description.
-    Answer each question within the time limit for the best assessment.
+    This system conducts a job-specific technical interview based on the job description and your resume.
+    The questions will be tailored to assess your fit for the specific role.
     """)
-    
-    # Create sidebar for settings and info
-    with st.sidebar:
-        st.header("Information")
-        st.info("""
-        This AI interviewer will:
-        - Ask up to 6 technical questions
-        - Evaluate your responses
-        - Provide feedback and a final assessment
-        
-        Each question has a time limit. Try to answer before time runs out!
-        """)
-        
-        if "db_connected" in st.session_state and st.session_state.db_connected:
-            st.success("✅ Database connected")
-        else:
-            st.error("❌ Database not connected")
-    
-    # Get job description and resume - either from URL parameters or manual input
+
     job_description = None
     resume_file = None
 
-    if st.query_params and "candidate_id" in st.query_params and "job_desc_id" in st.query_params:
-        # Load data from database based on URL parameters
+    if st.query_params:
         try:
-            job_desc = st.session_state.db.get_job_description(st.query_params['job_desc_id'])
-            if job_desc:
-                job_description = job_desc.get('job_desc')
-                st.write("📄 **Job Description loaded from database**")
-                
-                # Get candidate info
-                candidate = st.session_state.db.get_candidate(st.query_params['candidate_id'])
-                if candidate and "resume_url" in candidate:
-                    file_url = candidate.get("resume_url")
-                    resume_file = download_file(file_url)
-                    if resume_file:
-                        st.write("📄 **Resume loaded from database**")
-                    else:
-                        st.error("Failed to download resume file")
+            job_desc = job_descriptions.find_one(ObjectId(st.query_params['job_desc_id']))
+            job_description = job_desc['job_desc']
+
+            # Retrieve the file URL from MongoDB
+            candidate = candidates.find_one(ObjectId(st.query_params['candidate_id']))
+
+            if candidate:
+                file_url = candidate.get("resume")
+                response = requests.get(file_url)
+
+                if response.status_code == 200:
+                    resume_file = BytesIO(response.content)
                 else:
-                    st.error("Candidate information not found")
+                    st.error(f"Failed to download resume. Status code: {response.status_code}")
             else:
-                st.error("Job description not found")
+                st.error("Candidate information not found")
         except Exception as e:
-            st.error(f"Error loading data: {str(e)}")
-    
-    # If not using URL parameters or if database retrieval failed, show manual input fields
-    if not job_description or not resume_file:
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            job_description = st.text_area(
-                "📝 Job Description:", 
-                height=200,
-                placeholder="Paste the job description here..."
-            )
-            
-        with col2:
-            resume_file = st.file_uploader(
-                "📎 Your Resume (PDF format):", 
-                type="pdf",
-                help="Upload your resume in PDF format"
-            )
-    
-    # Once we have both job description and resume, proceed with interview
+            st.error(f"Error loading data: {e}")
+
+    if not st.query_params and not (job_description and resume_file):
+        # Upload job description
+        job_description = st.text_area("Enter the job description:", height=200, 
+                                     help="Paste the complete job description including requirements and responsibilities")
+
+        # Upload resume
+        resume_file = st.file_uploader("Upload your resume (PDF):", type="pdf",
+                                     help="Upload your current resume in PDF format")
+
     if job_description and resume_file:
-        # Display information about the loaded documents
-        with st.expander("📑 Loaded Documents", expanded=False):
-            st.markdown("### Job Description")
-            st.write(job_description[:500] + "..." if len(job_description) > 500 else job_description)
-            
-            st.markdown("### Resume")
-            resume_text = extract_text_from_pdf(resume_file)
-            st.write(resume_text[:500] + "..." if len(resume_text) > 500 else resume_text)
-        
-        # Initialize interview if not already done
-        if not st.session_state.interview_details:
-            st.session_state.interview_details = InterviewDetails(
+        # Extract text from the resume
+        resume_text = extract_text_from_pdf(resume_file)
+
+        # Initialize session state variables
+        if "interview_details" not in st.session_state:
+            interview_details = InterviewDetails(
                 job_description=job_description,
                 candidate_information=resume_text
             )
+            st.session_state.interview_details = interview_details
         
-        # Start interview when button is clicked
-        if not st.session_state.interview_in_progress:
-            if st.button("🚀 Start Interview", type="primary"):
-                with st.spinner("Preparing your interview..."):
-                    # Initialize the interview
+        if "history" not in st.session_state:
+            st.session_state.history = []
+        
+        if "display_msg" not in st.session_state:
+            st.session_state.display_msg = ""
+        
+        if "responses" not in st.session_state:
+            st.session_state.responses = []
+        
+        if "start_time" not in st.session_state:
+            st.session_state.start_time = time.time()
+        
+        if "current_question_time" not in st.session_state:
+            st.session_state.current_question_time = 2
+            
+        if "current_question_type" not in st.session_state:
+            st.session_state.current_question_type = "short_text"
+            
+        if "evaluation_criteria" not in st.session_state:
+            st.session_state.evaluation_criteria = None
+
+        # Start the interview process
+        if len(st.session_state.history) == 0:
+            if st.button("Start Interview", type="primary"):
+                with st.spinner("Preparing interview questions based on the job description..."):
                     result = await interviewer_agent.run(
-                        user_prompt="Hello, I'm ready to begin the interview.",
+                        user_prompt="Hello, I'm ready to start the interview for this specific role.",
                         deps=st.session_state.interview_details
                     )
                     st.session_state.history = result.all_messages()
                     st.session_state.display_msg = result.data
-                    st.session_state.interview_in_progress = True
-                    st.session_state.start_time = time.time()
-                st.rerun()
+                    st.rerun()
         else:
-            # Display interview in progress
-            st.markdown("### Interview in Progress")
+            # Display current question and timer
+            timer_container = st.empty()
             
-            # Display chat history
-            chat_container = st.container()
-            with chat_container:
-                with st.chat_message("assistant", avatar="🤖"):
-                    st.write(st.session_state.display_msg)
+            with st.chat_message("interviewer", avatar="👩‍💼"):
+                st.write(st.session_state.display_msg)
+            
+            # Handle different question types
+            if st.session_state.current_question_type == "multiple_choice":
+                # Extract options from the message
+                import re
+                message = st.session_state.display_msg
+                options = []
+                
+                # Simple pattern matching to extract options
+                option_pattern = r'[A-Z]\)\s+(.*?)(?=\s+[A-Z]\)|$)'
+                matches = re.findall(option_pattern, message)
+                if matches:
+                    options = [option.strip() for option in matches]
+                
+                if not options:
+                    # Fallback to numbered options if lettered options aren't found
+                    option_pattern = r'\d+\.\s+(.*?)(?=\s+\d+\.|$)'
+                    matches = re.findall(option_pattern, message)
+                    if matches:
+                        options = [option.strip() for option in matches]
+                
+                # If options were successfully extracted
+                if options:
+                    answer = st.radio("Select your answer:", options)
+                    if st.button("Submit Answer"):
+                        with st.spinner("Evaluating your response..."):
+                            result = await interviewer_agent.run(
+                                user_prompt=f"My answer is: {answer}",
+                                deps=st.session_state.interview_details,
+                                message_history=st.session_state.history
+                            )
+                            st.session_state.history = result.all_messages()
+                            st.session_state.display_msg = result.data
+                            st.session_state.start_time = time.time()
+                            st.rerun()
+                else:
+                    # If option extraction failed, fall back to text input
+                    answer = st.text_input("Your answer:")
+                    if st.button("Submit Answer"):
+                        with st.spinner("Evaluating your response..."):
+                            result = await interviewer_agent.run(
+                                user_prompt=answer,
+                                deps=st.session_state.interview_details,
+                                message_history=st.session_state.history
+                            )
+                            st.session_state.history = result.all_messages()
+                            st.session_state.display_msg = result.data
+                            st.session_state.start_time = time.time()
+                            st.rerun()
+            
+            elif st.session_state.current_question_type == "yes_no":
+                answer = st.radio("Your answer:", ["Yes", "No"])
+                if st.button("Submit Answer"):
+                    with st.spinner("Evaluating your response..."):
+                        result = await interviewer_agent.run(
+                            user_prompt=f"My answer is: {answer}",
+                            deps=st.session_state.interview_details,
+                            message_history=st.session_state.history
+                        )
+                        st.session_state.history = result.all_messages()
+                        st.session_state.display_msg = result.data
+                        st.session_state.start_time = time.time()
+                        st.rerun()
+            
+            else:  # short_text or default
+                answer = st.text_area("Your answer:", height=100)
+                if st.button("Submit Answer"):
+                    with st.spinner("Evaluating your response..."):
+                        result = await interviewer_agent.run(
+                            user_prompt=answer,
+                            deps=st.session_state.interview_details,
+                            message_history=st.session_state.history
+                        )
+                        st.session_state.history = result.all_messages()
+                        st.session_state.display_msg = result.data
+                        st.session_state.start_time = time.time()
+                        st.rerun()
             
             # Display timer
-            timer_placeholder = st.empty()
-            
-            # Input for candidate's answer
-            answer = st.chat_input("Your answer...")
-            
-            if answer:
-                # Display user's message
-                with chat_container:
-                    with st.chat_message("user", avatar="👤"):
-                        st.write(answer)
-                
-                # Process the answer
-                with st.spinner("Evaluating your answer..."):
-                    result = await interviewer_agent.run(
-                        user_prompt=answer,
-                        deps=st.session_state.interview_details,
-                        message_history=st.session_state.history
-                    )
-                    st.session_state.history = result.all_messages()
-                    st.session_state.display_msg = result.data
-                    st.session_state.start_time = time.time()
-                    st.rerun()
-            
-            # Show the timer while waiting for an answer
-            asyncio.create_task(countdown_timer(
-                60 * st.session_state.current_question_time, 
-                timer_placeholder
-            ))
-
-
-# --- Application Entry Point ---
+            asyncio.run(display_timer(timer_container, 60 * st.session_state.current_question_time))
 
 if __name__ == "__main__":
     asyncio.run(main())
-```
