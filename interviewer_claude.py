@@ -11,6 +11,7 @@ from bson import ObjectId
 import requests
 from io import BytesIO
 import time
+import copy
 
 import logfire
 from pydantic import BaseModel, Field
@@ -74,28 +75,28 @@ class InterviewDetails(BaseModel):
     """Structure for an interview session with a candidate."""
     job_description: str = Field(description="The full text of the job description")
     candidate_information: str = Field(description="The full text of the candidate's resume")
-    job_requirements: Optional[JobRequirement] = Field(description="Structured job requirements", default=None)
-    candidate_profile: Optional[CandidateProfile] = Field(description="Structured candidate profile", default=None)
+    # job_requirements: Optional[JobRequirement] = Field(description="Structured job requirements", default=None)
+    # candidate_profile: Optional[CandidateProfile] = Field(description="Structured candidate profile", default=None)
 
 class EvaluationCriteria(BaseModel):
     """Structure for evaluation criteria based on job requirements."""
     technical_assessment: Dict[str, str] = Field(
-        description="Criteria for assessing technical skills with skill name as key and criteria as value"
+        description="Technical assessment component containing criteria for evaluating hard skills specific to the role, such as programming languages, tools, platforms, and methodologies with skill name as key and criteria as value. Dictionary mapping specific technical skills (e.g., 'Python', 'AWS', 'React') to detailed evaluation criteria for each skill. The criteria should define the expected proficiency level and specific capabilities."
     )
     experience_assessment: Dict[str, str] = Field(
-        description="Criteria for assessing relevant experience"
+        description="Experience assessment component for evaluating relevant work history, including industry-specific experience, role-related responsibilities, and achievements in similar positions. Dictionary mapping experience categories (e.g., 'Industry Experience', 'Leadership', 'Project Management') to specific requirements and expectations for each category. Should include both quantitative (years) and qualitative aspects."
     )
     communication_assessment: str = Field(
-        description="Criteria for assessing communication skills"
+        description="Detailed criteria for evaluating verbal and written communication abilities, including clarity, conciseness, audience adaptation, technical communication, and presentation skills."
     )
     problem_solving_assessment: str = Field(
-        description="Criteria for assessing problem-solving abilities"
+        description="Comprehensive criteria for assessing analytical thinking, creative problem-solving approach, solution evaluation methods, and ability to handle ambiguity and constraints."
     )
     job_fit_assessment: str = Field(
-        description="Criteria for assessing overall job fit"
+        description="Holistic criteria for evaluating candidate alignment with company culture, team dynamics, growth potential within the organization, and long-term career objectives relative to the position."
     )
-    scoring_rubric: Dict[str, Dict[str, int]] = Field(
-        description="Detailed scoring rubric for each assessment area with levels and corresponding scores"
+    scoring_rubric: Dict[str, str] = Field(
+        description="Comprehensive scoring system that defines how each assessment area should be evaluated numerically, allowing for standardized comparison between candidates across all evaluation dimensions. Dictionary mapping assessment categories (e.g., 'technical', 'experience', 'soft_skills') to their respective ScoringLevel objects. This provides a structured way to score each major evaluation area."
     )
 
 class InterviewResponse(BaseModel):
@@ -105,24 +106,34 @@ class InterviewResponse(BaseModel):
     skill_assessed: str = Field(description="The skill being assessed by this question")
     answer: str = Field(description="The candidate's answer")
     evaluation: str = Field(description="Detailed evaluation of the answer")
-    strengths: List[str] = Field(description="Strengths identified in the answer")
-    areas_for_improvement: List[str] = Field(description="Areas where the answer could be improved")
+    strengths: Optional[List[str]] = Field(description="Strengths identified in the answer")
+    areas_for_improvement: Optional[List[str]] = Field(description="Areas where the answer could be improved")
     score: int = Field(description="The score (1-100) of the response")
 
 class InterviewSummary(BaseModel):
     """Structure for the overall interview assessment."""
     technical_skills_assessment: Dict[str, int] = Field(
-        description="Assessment of technical skills with skill name and score"
+        description="Dictionary mapping specific technical skills (e.g., 'Python', 'SQL', 'System Design') to their numerical scores (typically 1-5, where 5 is highest proficiency). Only include skills that were assessed during the interview."
     )
     soft_skills_assessment: Dict[str, int] = Field(
-        description="Assessment of soft skills with skill name and score"
+        description="Dictionary mapping soft skills (e.g., 'Communication', 'Teamwork', 'Problem-solving') to their numerical scores (typically 1-5, where 5 is highest proficiency). Only include skills that were observed during the interview."
     )
-    overall_score: int = Field(description="Overall interview score (1-100)")
-    strengths: List[str] = Field(description="Candidate's key strengths")
-    areas_for_improvement: List[str] = Field(description="Areas where the candidate could improve")
-    job_fit_assessment: str = Field(description="Assessment of how well the candidate fits the job")
+    overall_score: int = Field(
+        description="Aggregate numerical score representing the candidate's overall interview performance on a scale from 1 to 100, where higher scores indicate stronger performance.",
+        ge=1,
+        le=100
+    )
+    strengths: List[str] = Field(
+        description="List of concise, specific phrases identifying the candidate's most notable strengths demonstrated during the interview. Each strength should be a single clear statement without explanations."
+    )
+    areas_for_improvement: List[str] = Field(
+        description="List of concise, specific phrases identifying areas where the candidate showed weakness or could improve. Each area should be a single clear statement without explanations."
+    )
+    job_fit_assessment: str = Field(
+        description="Concise paragraph (1-3 sentences) evaluating how well the candidate's skills, experience, and attributes align with the specific job requirements and team dynamics."
+    )
     hiring_recommendation: Literal["Strong Yes", "Yes", "Maybe", "No", "Strong No"] = Field(
-        description="Recommendation on whether to hire the candidate"
+        description="Single categorical assessment of whether to hire the candidate, selected from exactly one of these five options: 'Strong Yes', 'Yes', 'Maybe', 'No', or 'Strong No'."
     )
 
 # Function to extract text from a PDF (for the resume)
@@ -197,10 +208,11 @@ criteria_generator = Agent(
     model=model,
     deps_type=InterviewDetails,
     result_type=EvaluationCriteria,
+    retries=5,
     system_prompt=(
         "You are an expert at creating evaluation criteria for technical interviews. "
         "Create a detailed, role-specific evaluation matrix that:"
-        "\n1. Focuses on the SPECIFIC technical skills listed in the job description"
+        "\n1. Includes criteria for SPECIFIC technical skills listed in the job description relevant to the role"
         "\n2. Includes criteria for assessing experience requirements"
         "\n3. Includes criteria for assessing problem-solving abilities relevant to the role"
         "\n4. Includes criteria for assessing communication in a role-specific context"
@@ -235,6 +247,7 @@ summary_evaluator = Agent(
     model=model,
     deps_type=InterviewDetails,
     result_type=InterviewSummary,
+    retries=5,
     system_prompt=(
         "You are an expert at providing comprehensive interview assessments. "
         "Create a detailed summary that:"
@@ -258,14 +271,14 @@ async def parse_inputs(ctx: RunContext[InterviewDetails]) -> str:
         "Parse the following job description into structured requirements:\n" + ctx.deps.job_description,
         deps=ctx.deps
     )
-    ctx.deps.job_requirements = job_result.data
+    st.session_state.job_requirements = job_result.data
     
     # Parse resume
     resume_result = await parser_agent.run(
         "Parse the following resume into a structured candidate profile:\n" + ctx.deps.candidate_information,
         deps=ctx.deps
     )
-    ctx.deps.candidate_profile = resume_result.data
+    st.session_state.candidate_profile = resume_result.data
     
     return "Inputs parsed successfully. Job requirements and candidate profile extracted."
 
@@ -288,8 +301,8 @@ async def generate_question(ctx: RunContext[InterviewDetails]) -> InterviewQuest
     
     r = await question_generator.run(
         prompt.format(
-            job_requirements=ctx.deps.job_requirements,
-            candidate_profile=ctx.deps.candidate_profile,
+            job_requirements=st.session_state.job_requirements,
+            candidate_profile=st.session_state.candidate_profile,
             previous_questions=previous_questions
         ),
         deps=ctx.deps
@@ -300,10 +313,20 @@ async def generate_question(ctx: RunContext[InterviewDetails]) -> InterviewQuest
 @interviewer_agent.tool
 async def generate_evaluation_criteria(ctx: RunContext[InterviewDetails]) -> EvaluationCriteria:
     """Generate detailed evaluation criteria based on job requirements."""
+    prompt = """
+        Create detailed evaluation criteria specific to this role and its requirements.
+
+        Job requirements: {job_requirements}
+        """
+    while not 'job_requirements' in st.session_state:
+        await asyncio.sleep(1)
     r = await criteria_generator.run(
-        "Create detailed evaluation criteria specific to this role and its requirements.",
+        prompt.format(
+            job_requirements=st.session_state.job_requirements
+        ),
         deps=ctx.deps
     )
+
     st.session_state.evaluation_criteria = r.data
     return r.data
 
@@ -338,7 +361,7 @@ async def evaluate_response(
             skill_assessed=skill_assessed,
             answer=answer,
             criteria=st.session_state.evaluation_criteria if "evaluation_criteria" in st.session_state else "Not available",
-            job_requirements=ctx.deps.job_requirements
+            job_requirements=st.session_state.job_requirements
         ),
         deps=ctx.deps
     )
@@ -355,13 +378,15 @@ async def evaluate_interview(ctx: RunContext[InterviewDetails]) -> InterviewSumm
     Candidate Profile: {candidate_profile}
     All Responses: {responses}
     
-    Provide a detailed assessment of how well the candidate meets the specific requirements of this role.
+    Provide a detailed assessment of how well the candidate meets each of the specific requirements of this role.
+    Format your output as a matrix with evaluated job requirement, question asked, response, score, and evaluation as columns.
+    
     """
     
     r = await summary_evaluator.run(
         prompt.format(
-            job_requirements=ctx.deps.job_requirements,
-            candidate_profile=ctx.deps.candidate_profile,
+            job_requirements=st.session_state.job_requirements,
+            candidate_profile=st.session_state.candidate_profile,
             responses=st.session_state.responses if "responses" in st.session_state else []
         ),
         deps=ctx.deps
@@ -402,7 +427,7 @@ async def print_timer(job_description, timer, s):
             st.toast("Time's up. Moving to the next question.")
             with st.spinner("Please wait..."):
                 result = await interviewer_agent.run(
-                    user_prompt="Time's up, moving on to the next question.",
+                    user_prompt="No answer.",
                     deps=st.session_state.interview_details,
                     message_history=st.session_state.history
                 )
@@ -411,6 +436,7 @@ async def print_timer(job_description, timer, s):
                 st.session_state.start_time = time.time()
                 st.rerun()
 
+Agent.instrument_all()
 async def main():
     st.title("Job-Specific AI Interview System")
 
