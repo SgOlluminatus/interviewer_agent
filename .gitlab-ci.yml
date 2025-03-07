@@ -1,0 +1,12 @@
+stages:
+    - deploy
+
+test:
+    stage: deploy
+    script:
+        - pwd
+        - whoami
+        - source /home/tsogjavkhlan_odbayar/interviewer/interviewer/bin/activate
+        - nohup streamlit run interviewer.py >/dev/null 2>&1 &
+    only:
+        - main
