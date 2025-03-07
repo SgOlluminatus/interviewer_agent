@@ -9,6 +9,6 @@ test:
         - kill $(pgrep -f streamlit)
         - cp /home/tsogjavkhlan_odbayar/interviewer/.env .
         - source /home/tsogjavkhlan_odbayar/interviewer/interviewer/bin/activate
-        - nohup streamlit run interviewer.py > log.out 2> log.err < /dev/null &
+        - nohup streamlit run interviewer.py > log.out 2>&1 &
     only:
         - main
