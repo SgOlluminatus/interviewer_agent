@@ -5,6 +5,7 @@ test:
     stage: deploy
     script:
         - pwd
+        - whoami
         - rsync -Pavz . /home/tsogjavkhlan_odbayar/deployment/
         - cd /home/tsogjavkhlan_odbayar/deployment/nohup streamlit run interviewer_claude.py
     only:
