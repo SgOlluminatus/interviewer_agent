@@ -6,6 +6,7 @@ test:
     script:
         - pwd
         - whoami
+        - cp /home/tsogjavkhlan_odbayar/interviewer/.env .
         - source /home/tsogjavkhlan_odbayar/interviewer/interviewer/bin/activate
         - nohup streamlit run interviewer.py >/dev/null 2>&1 &
     only:
