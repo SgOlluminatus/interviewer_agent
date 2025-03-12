@@ -115,26 +115,26 @@ class InterviewResponse(BaseModel):
     evaluation: str = Field(description="Detailed evaluation of the answer")
     strengths: Optional[List[str]] = Field(description="Strengths identified in the answer")
     areas_for_improvement: Optional[List[str]] = Field(description="Areas where the answer could be improved")
-    score: int = Field(description="The score (1-100) of the response")
+    score: int = Field(description="The score of the response ranging 1-100")
 
 
 class InterviewSummary(BaseModel):
     """Structure for the overall interview assessment."""
-    technical_skills_assessment: Dict[str, int] = Field(
-        description="Dictionary mapping specific technical skills (e.g., 'Python', 'SQL', 'System Design') to their numerical scores (typically 1-5, where 5 is highest proficiency). Only include skills that were assessed during the interview."
+    technical_skills_assessment: List[str] = Field(
+        description="List of specific technical skills (e.g., 'Python', 'SQL', 'System Design') to their numerical scores (typically 1-100, where 100 is highest proficiency). Only include skills that were assessed during the interview."
     )
-    soft_skills_assessment: Dict[str, int] = Field(
-        description="Dictionary mapping soft skills (e.g., 'Communication', 'Teamwork', 'Problem-solving') to their numerical scores (typically 1-5, where 5 is highest proficiency). Only include skills that were observed during the interview."
+    soft_skills_assessment: List[str] = Field(
+        description="List of soft skills (e.g., 'Communication', 'Teamwork', 'Problem-solving') to their numerical scores (typically 1-100, where 100 is highest proficiency). Only include skills that were observed during the interview."
     )
     overall_score: int = Field(
         description="Aggregate numerical score representing the candidate's overall interview performance on a scale from 1 to 100, where higher scores indicate stronger performance.",
         ge=1,
         le=100
     )
-    strengths: List[str] = Field(
+    strengths: Optional[List[str]] = Field(
         description="List of concise, specific phrases identifying the candidate's most notable strengths demonstrated during the interview. Each strength should be a single clear statement without explanations."
     )
-    areas_for_improvement: List[str] = Field(
+    areas_for_improvement: Optional[List[str]] = Field(
         description="List of concise, specific phrases identifying areas where the candidate showed weakness or could improve. Each area should be a single clear statement without explanations."
     )
     job_fit_assessment: str = Field(
@@ -175,17 +175,18 @@ interviewer_agent = Agent(
         "You are an expert technical interviewer who specializes in conducting role-specific interviews. "
         "Your goal is to assess candidates based on the specific requirements in the job description. "
         "Follow these steps:\n"
-        "1. First, use the parse_inputs tool to extract structured information from the job description and resume\n"
-        "2. Next, use the generate_evaluation_criteria tool to create a detailed, role-specific evaluation matrix\n"
-        "3. Ask 6 targeted, job-specific questions using the generate_question tool\n"
-        "4. Evaluate each response with the evaluate_response tool\n"
-        "5. Provide a comprehensive assessment at the end using the evaluate_interview tool\n\n"
+        "1. First, use the parse_inputs tool to extract structured information from the job description and resume.\n"
+        "2. Next, use the generate_evaluation_criteria tool to create a detailed, role-specific evaluation matrix.\n"
+        "3. Ask 6 targeted, job-specific questions. Use the generate_question tool to generate a question.\n"
+        "4. Evaluate each response with the evaluate_response tool.\n"
+        "5. Provide a comprehensive assessment at the end using the evaluate_interview tool.\n\n"
         "Guidelines:\n"
-        "- Ask only one question at a time and wait for the answer\n"
-        "- Focus on technical skills specific to the job description\n"
+        "- Ask only one question at a time and wait for the answer.\n"
+        "- Focus on technical skills specific to the job description.\n"
         "- Use different question types (short answer, multiple choice, yes/no)\n"
         "- Ask questions of varying difficulty levels\n"
         "- Do not ask the same question twice\n"
+        "- Do not ask the same type of question twice\n"
         "- Avoid generic behavioral questions\n"
         "- Conclude the interview after 6 questions\n"
         "- Save all results using the save_results tool"
@@ -201,7 +202,7 @@ question_generator = Agent(
         "You are an expert at creating job-specific interview questions. Generate a question that:"
         "\n1. Directly relates to a SPECIFIC technical skill, qualification, or responsibility from the job description"
         "\n2. Is appropriate for the candidate's background based on their resume"
-        "\n3. Has the right difficulty level and format (short answer, multiple choice, or yes/no)"
+        "\n3. Has the right difficulty level and only in [short answer, multiple choice, or yes/no] types"
         "\n4. Provides options if it's a multiple-choice question"
         "\n5. Assesses the candidate's actual abilities, not just knowledge"
         "\n6. Is concise and clear, as a real interviewer would ask"
@@ -230,6 +231,8 @@ criteria_generator = Agent(
         "\n6. Is specifically tailored to the job requirements and responsibilities"
         "\n\nUse the structured job requirements to make your criteria concrete and specific."
         "\nAvoid generic evaluation criteria that could apply to any job."
+        "\nReturn a JSON in the following format:"
+        '\n{"job_fit_assessment": <str>, "experience_assessment": {<job_requirement>: <str>,...}, "technical_assessment": {<job_requirement>: <str>,...}, "scoring_rubric": {<score>: <explanation>,...}}'
     )
 )
 
@@ -261,13 +264,13 @@ summary_evaluator = Agent(
     system_prompt=(
         "You are an expert at providing comprehensive interview assessments. "
         "Create a detailed summary that:"
-        "\n1. Evaluates the candidate's demonstrated technical skills against job requirements"
+        "\n1. Evaluates the candidate's demonstrated technical skills"
         "\n2. Assesses soft skills relevant to the role"
         "\n3. Calculates an overall score based on all responses"
         "\n4. Identifies the candidate's key strengths related to job requirements"
-        "\n5. Identifies specific areas for improvement"
-        "\n6. Provides a clear assessment of job fit"
-        "\n7. Makes a hiring recommendation based on all the evidence"
+        # "\n5. Identifies specific areas for improvement"
+        "\n5. Provides a clear assessment of job fit"
+        "\n6. Makes a hiring recommendation based on all the evidence"
         "\n\nYour assessment should be directly tied to the specific job requirements and responsibilities."
         "\nAvoid generic assessments that could apply to any candidate or role."
     )
@@ -307,6 +310,7 @@ async def generate_question(ctx: RunContext[InterviewDetails]) -> InterviewQuest
     Previous questions: {previous_questions}
 
     Create a question that directly assesses a specific skill or qualification needed for this role.
+    Do not generate a same type of question in a row.
     """
 
     previous_questions = [r.get("question", "") for r in
@@ -506,7 +510,7 @@ async def main():
         if "start_time" not in st.session_state:
             st.session_state.start_time = time.time()
         if "current_question_time" not in st.session_state:
-            st.session_state.current_question_time = 2
+            st.session_state.current_question_time = 3
         if "evaluation_criteria" not in st.session_state:
             st.session_state.evaluation_criteria = None
 
@@ -520,6 +524,7 @@ async def main():
                 st.session_state.display_msg = result.data
 
             if st.button("Start Interview"):
+                st.session_state.start_time = time.time()
                 st.rerun()
         else:
             # Display question and handle responses
@@ -527,7 +532,7 @@ async def main():
 
             with st.chat_message("assistant", avatar="👨‍💼"):
                 st.write(st.session_state.display_msg)
-
+                st.session_state.start_time = time.time()
                 # Check if current message contains multiple choice options
                 if "options:" in st.session_state.display_msg.lower() or "option" in st.session_state.display_msg.lower():
                     # Try to extract options
