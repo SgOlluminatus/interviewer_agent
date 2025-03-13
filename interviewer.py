@@ -23,7 +23,7 @@ nest_asyncio.apply()
 # Load environment variables
 load_dotenv(override=True)
 
-model = OpenAIModel(os.getenv("MODEL"), api_key=os.getenv("OPENAI_API_KEY"))
+model = OpenAIModel(os.getenv("MODEL"), api_key=os.getenv("O3_API_KEY"))
 logfire.configure(send_to_logfire='if-token-present')
 
 # MongoDB setup
@@ -46,15 +46,15 @@ class InterviewQuestion(BaseModel):
     question_type: Literal["short_answer", "multiple_choice", "yes_no"] = Field(
         description="The type of question format"
     )
-    time: int = Field(description="The time required to answer the question in minutes", default=2)
+    time: Optional[int] = Field(description="The time required to answer the question in minutes", default=3)
     options: Optional[List[str]] = Field(
         description="Answer options for a multiple choice question",
         default=None
     )
-    skill_assessed: str = Field(
+    skill_assessed: Optional[str] = Field(
         description="The specific skill or qualification from the job description being assessed"
     )
-    difficulty_level: Literal["basic", "intermediate", "advanced"] = Field(
+    difficulty_level: Optional[Literal["basic", "intermediate", "advanced"]] = Field(
         description="The difficulty level of the question"
     )
 
@@ -170,24 +170,26 @@ parser_agent = Agent(
 interviewer_agent = Agent(
     model=model,
     deps_type=InterviewDetails,
-    retries=3,
+    retries=2,
     system_prompt=(
         "You are an expert technical interviewer who specializes in conducting role-specific interviews. "
         "Your goal is to assess candidates based on the specific requirements in the job description. "
-        "Follow these steps:\n"
+        "You MUST follow these steps in order:\n"
         "1. First, use the parse_inputs tool to extract structured information from the job description and resume.\n"
         "2. Next, use the generate_evaluation_criteria tool to create a detailed, role-specific evaluation matrix.\n"
-        "3. Ask 6 targeted, job-specific questions. Use the generate_question tool to generate a question.\n"
+        "3. Next, use the generate_question tool to generate a targeted, job-specific question and ask it from the candidate.\n"
         "4. Evaluate each response with the evaluate_response tool.\n"
         "5. Provide a comprehensive assessment at the end using the evaluate_interview tool.\n\n"
         "Guidelines:\n"
+        "- Ask questions in Mongolian language, the candidate will also respond in Mongolian.\n"
         "- Ask only one question at a time and wait for the answer.\n"
         "- Focus on technical skills specific to the job description.\n"
         "- Use different question types (short answer, multiple choice, yes/no)\n"
         "- Ask questions of varying difficulty levels\n"
         "- Do not ask the same question twice\n"
         "- Do not ask the same type of question twice\n"
-        "- Avoid generic behavioral questions\n"
+        "- Do NOT pass a question to the generate_question tool.\n"
+        "- You must avoid generic behavioral questions and behavioral questions altogether\n"
         "- Conclude the interview after 6 questions\n"
         "- Save all results using the save_results tool"
     ),
@@ -199,7 +201,7 @@ question_generator = Agent(
     deps_type=InterviewDetails,
     result_type=InterviewQuestion,
     system_prompt=(
-        "You are an expert at creating job-specific interview questions. Generate a question that:"
+        "You are an expert at creating job-specific interview questions. Generate a question in Mongolian language that:"
         "\n1. Directly relates to a SPECIFIC technical skill, qualification, or responsibility from the job description"
         "\n2. Is appropriate for the candidate's background based on their resume"
         "\n3. Has the right difficulty level and only in [short answer, multiple choice, or yes/no] types"
@@ -252,6 +254,8 @@ response_evaluator = Agent(
         "\n6. Consider the candidate's background from their resume"
         "\n7. Be objective and constructive"
         "\n\nEnsure your evaluation directly ties back to the specific skill being assessed and its importance for the role."
+        "\nYou must respond in Mongolian language."
+
     )
 )
 
@@ -273,6 +277,7 @@ summary_evaluator = Agent(
         "\n6. Makes a hiring recommendation based on all the evidence"
         "\n\nYour assessment should be directly tied to the specific job requirements and responsibilities."
         "\nAvoid generic assessments that could apply to any candidate or role."
+        "\nYou must respond in Mongolian language."
     )
 )
 
@@ -297,7 +302,7 @@ async def parse_inputs(ctx: RunContext[InterviewDetails]) -> str:
     return "Inputs parsed successfully. Job requirements and candidate profile extracted."
 
 
-@interviewer_agent.tool
+@interviewer_agent.tool(require_parameter_descriptions=False)
 async def generate_question(ctx: RunContext[InterviewDetails]) -> InterviewQuestion:
     """Generate a job-specific interview question."""
     prompt = """
