@@ -303,7 +303,7 @@ async def parse_inputs(ctx: RunContext[InterviewDetails]) -> str:
 
 
 @interviewer_agent.tool(require_parameter_descriptions=False)
-async def generate_question(ctx: RunContext[InterviewDetails]) -> InterviewQuestion:
+async def generate_question(ctx: RunContext[InterviewDetails], **kwargs) -> InterviewQuestion:
     """Generate a job-specific interview question."""
     prompt = """
     Generate a job-specific interview question based on the job requirements and candidate profile.
