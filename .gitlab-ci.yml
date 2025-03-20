@@ -10,6 +10,6 @@ test:
         - cp /home/tsogjavkhlan_odbayar/interviewer/.env .
         - source /home/tsogjavkhlan_odbayar/interviewer/interviewer/bin/activate
         - printf '3' | logfire projects use
-        - nohup streamlit run interviewer.py > log.out 2>&1 &
+        - nohup streamlit run english_tester.py > log.out 2>&1 &
     only:
         - main
