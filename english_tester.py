@@ -107,6 +107,7 @@ tester_agent = Agent(
         # "- The difficulty of each question should be changed according to the cambridge english scale"
         "- Do not ask the same question twice\n"
         "- Do not ask the same type of question twice in a row\n"
+        "- If the user response was not enough, ask a one time clarifying question. This clarifying question should be asked at most only once during the entire test.\n"
         "- Output a JSON and include options in a separate list in the JSON for multiple choice type questions. \n"
         f"- Conclude the test after {os.getenv('Q_CNT')} questions"
     ),
